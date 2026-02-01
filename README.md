@@ -2,64 +2,70 @@
 
 An MCP server for managing agentic coding workflows with Emacs org-mode.
 
+**Design intent:** Emacs/Org is the UI + source of truth. `org-mcp` is the context gateway that lets coding agents retrieve *minimum viable task context* and write back status/logs.
+
 ## Overview
 
 org-mcp provides:
-- An MCP server that manages task tracking through an Emacs daemon
-- An Emacs org-mode extension with a dashboard for visualizing tasks
-- Integration with Claude Code for spawning and managing AI coding agents
+- An MCP server (SDK 1.24.3) that reads/writes a workflow Org file directly (no Emacs daemon required)
+- An Emacs org-mode extension (optional) for interacting with the workflow in-editor
+
+Built with:
+- MCP SDK 1.24.3 with modern `McpServer` API
+- Bun runtime
+- Zod for schema validation
+
+## Workflow file
+
+`org-mcp` reads/writes a single Org file on disk.
+
+- Path: `ORG_MCP_WORKFLOW_FILE` (defaults to `~/workflow.org`)
+- A task is any Org heading with an `:ID:` property in its `:PROPERTIES:` drawer.
+- States are expressed as Org TODO keywords:
+  - `BACKLOG`, `TODO`, `IN-PROGRESS`, `IN-REVIEW`, `DONE`, `CANCELLED`
+
+Within a task, these subheadings have special meaning:
+- `** Agent Context` — exported to agents via `get_task_context`
+- `** Private Notes` — not exported (convention)
+- `** Log` — append-only entries written by agents/OpenClaw via `append_task_log`
 
 ## Project Structure
 
 ```
 org-mcp/
-├── src/           # MCP server source code
+├── src/           # MCP server + org parsing
 ├── emacs/         # Emacs org-mode extension
-├── package.json   # Node.js dependencies
-└── tsconfig.json  # TypeScript configuration
+├── test/          # Bun tests
+├── package.json
+└── tsconfig.json
 ```
 
 ## Installation
 
-### MCP Server
+Prereq: [Bun](https://bun.sh)
 
 ```bash
-npm install
-npm run build
-```
-
-### Emacs Extension
-
-Add to your Emacs configuration:
-
-```elisp
-(add-to-list 'load-path "/path/to/org-mcp/emacs")
-(require 'org-mcp)
-
-;; Optionally set the workflow file location
-(setq org-mcp-workflow-file "~/workflow.org")
+bun install
+bun run typecheck
+bun test
+bun run build
 ```
 
 ## Usage
 
-### MCP Server
+Run on stdio:
 
-The server runs on stdio and provides tools for:
-- `create_task`: Create a new task in the org file
-- `list_tasks`: List all tasks
-- `update_task_status`: Update task status
+```bash
+export ORG_MCP_WORKFLOW_FILE=~/workflow.org
+bun run dev
+```
 
-### Emacs Commands
+### Tools
 
-- `C-c m d`: Open the org-mcp dashboard
-- `C-c m t`: Create a new task
-- `C-c m l`: List all tasks
-- `C-c m s`: Update task status
-- `C-c m a`: Spawn a Claude Code agent
-
-## Development Status
-
-This is a minimal boilerplate template. Core functionality is stubbed out and ready for implementation.
+- `list_tasks` — list tasks (id/state/title), with optional filters
+- `get_task_context` — returns JSON (as text) including `Agent Context`
+- `set_task_state` — updates the task TODO keyword
+- `append_task_log` — appends a timestamped entry under `** Log`
 
 ## License
 

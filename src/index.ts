@@ -1,151 +1,156 @@
 #!/usr/bin/env node
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+import * as z from "zod/v3";
+import { DEFAULT_STATES, getTaskAgentContext, getWorkflowFilePath, parseTasksFromOrg, readOrgFile, setTaskState, appendTaskLog, writeOrgFile } from "./org.js";
 
 /**
- * Minimal MCP server for org-mcp
- * Provides tools for managing agentic workflows with Emacs org-mode
+ * org-mcp (file-editing mode)
+ *
+ * Emacs/Org is the UI + source of truth; this MCP server provides:
+ * - minimal task context for agents
+ * - structured write-back (status/log)
+ *
+ * Workflow file path is controlled by ORG_MCP_WORKFLOW_FILE (defaults to ~/workflow.org).
  */
 
-class OrgMCPServer {
-  private server: Server;
+const server = new McpServer({
+  name: "org-mcp",
+  version: "0.1.0",
+});
 
-  constructor() {
-    this.server = new Server(
-      {
-        name: "org-mcp",
-        version: "0.1.0",
-      },
-      {
-        capabilities: {
-          tools: {},
-        },
-      }
-    );
+const STATES = DEFAULT_STATES;
 
-    this.setupHandlers();
-  }
+server.registerTool(
+  "list_tasks",
+  {
+    title: "List Tasks",
+    description: "List tasks that have an :ID: property. Optionally filter by state or text query.",
+    inputSchema: {
+      state: z.string().optional().describe(`Filter by state (${STATES.join(", ")})`),
+      query: z.string().optional().describe("Substring match against task title"),
+      limit: z.number().int().positive().max(500).optional().describe("Max tasks to return"),
+    },
+  },
+  async ({ state, query, limit }: { state?: string; query?: string; limit?: number }) => {
+    const filePath = getWorkflowFilePath();
+    const text = await readOrgFile(filePath);
+    let tasks = parseTasksFromOrg(text, STATES);
 
-  private setupHandlers() {
-    // List available tools
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
-      return {
-        tools: [
-          {
-            name: "create_task",
-            description: "Create a new task in the org file",
-            inputSchema: {
-              type: "object",
-              properties: {
-                title: {
-                  type: "string",
-                  description: "Task title",
-                },
-                description: {
-                  type: "string",
-                  description: "Task description",
-                },
-              },
-              required: ["title"],
-            },
-          },
-          {
-            name: "list_tasks",
-            description: "List all tasks from the org file",
-            inputSchema: {
-              type: "object",
-              properties: {},
-            },
-          },
-          {
-            name: "update_task_status",
-            description: "Update the status of a task",
-            inputSchema: {
-              type: "object",
-              properties: {
-                task_id: {
-                  type: "string",
-                  description: "Task identifier",
-                },
-                status: {
-                  type: "string",
-                  description: "New status (TODO, IN-PROGRESS, DONE, etc.)",
-                },
-              },
-              required: ["task_id", "status"],
-            },
-          },
-        ],
-      };
-    });
+    if (state) tasks = tasks.filter((t) => t.state === state);
+    if (query) {
+      const q = query.toLowerCase();
+      tasks = tasks.filter((t) => t.title.toLowerCase().includes(q));
+    }
+    if (limit) tasks = tasks.slice(0, limit);
 
-    // Handle tool calls
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const { name, arguments: args } = request.params;
+    const lines = tasks.map((t) => `${t.id}\t${t.state ?? ""}\t${t.title}`);
 
-      switch (name) {
-        case "create_task":
-          return this.createTask(args);
-        case "list_tasks":
-          return this.listTasks(args);
-        case "update_task_status":
-          return this.updateTaskStatus(args);
-        default:
-          throw new Error(`Unknown tool: ${name}`);
-      }
-    });
-  }
-
-  private async createTask(args: any) {
-    // TODO: Implement task creation logic
-    // This will interact with the Emacs daemon to create tasks in the org file
     return {
       content: [
         {
           type: "text",
-          text: `Task creation stub: ${args.title}`,
+          text: lines.length
+            ? lines.join("\n")
+            : "No matching tasks (tasks must have :ID: in properties).",
         },
       ],
     };
   }
+);
 
-  private async listTasks(args: any) {
-    // TODO: Implement task listing logic
-    // This will query the Emacs daemon for tasks from the org file
+server.registerTool(
+  "get_task_context",
+  {
+    title: "Get Task Context",
+    description: "Fetch the agent-visible context for a task (from the 'Agent Context' section), plus basic metadata.",
+    inputSchema: {
+      task_id: z.string().describe("Task :ID: property value"),
+    },
+  },
+  async ({ task_id }: { task_id: string }) => {
+    const filePath = getWorkflowFilePath();
+    const text = await readOrgFile(filePath);
+    const ctx = getTaskAgentContext(text, task_id, STATES);
+
+    const payload = {
+      id: ctx.id,
+      state: ctx.state,
+      title: ctx.title,
+      properties: ctx.properties,
+      agentContext: ctx.agentContext,
+    };
+
     return {
       content: [
         {
           type: "text",
-          text: "Task listing stub",
+          text: JSON.stringify(payload, null, 2),
         },
       ],
     };
   }
+);
 
-  private async updateTaskStatus(args: any) {
-    // TODO: Implement task status update logic
-    // This will communicate with the Emacs daemon to update task status
+server.registerTool(
+  "set_task_state",
+  {
+    title: "Set Task State",
+    description: `Set the TODO keyword/state for a task. Allowed: ${STATES.join(", ")}.`,
+    inputSchema: {
+      task_id: z.string().describe("Task :ID: property value"),
+      state: z.string().describe("New state"),
+    },
+  },
+  async ({ task_id, state }: { task_id: string; state: string }) => {
+    const filePath = getWorkflowFilePath();
+    const text = await readOrgFile(filePath);
+    const next = setTaskState(text, task_id, state, STATES);
+    await writeOrgFile(filePath, next);
+
     return {
       content: [
         {
           type: "text",
-          text: `Status update stub: ${args.task_id} -> ${args.status}`,
+          text: `Updated task ${task_id} -> ${state}`,
         },
       ],
     };
   }
+);
 
-  async run() {
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
-    console.error("org-mcp server running on stdio");
+server.registerTool(
+  "append_task_log",
+  {
+    title: "Append Task Log",
+    description: "Append a timestamped entry under the task's 'Log' section (creates it if missing).",
+    inputSchema: {
+      task_id: z.string().describe("Task :ID: property value"),
+      entry: z.string().describe("Log entry text"),
+    },
+  },
+  async ({ task_id, entry }: { task_id: string; entry: string }) => {
+    const filePath = getWorkflowFilePath();
+    const text = await readOrgFile(filePath);
+    const next = appendTaskLog(text, task_id, entry, { allowedStates: STATES });
+    await writeOrgFile(filePath, next);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Appended log entry to task ${task_id}`,
+        },
+      ],
+    };
   }
+);
+
+async function main() {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error(`org-mcp server running on stdio (file=${getWorkflowFilePath()})`);
 }
 
-const server = new OrgMCPServer();
-server.run().catch(console.error);
+main().catch(console.error);
