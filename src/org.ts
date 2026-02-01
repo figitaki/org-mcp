@@ -35,11 +35,67 @@ export function expandHome(p: string): string {
 }
 
 export async function readOrgFile(filePath: string): Promise<string> {
-  return await fs.readFile(filePath, "utf8");
+  try {
+    return await fs.readFile(filePath, "utf8");
+  } catch (err: any) {
+    // Treat missing workflow file as empty; callers can create it on write.
+    if (err?.code === "ENOENT") return "";
+    throw err;
+  }
+}
+
+async function writeFileAtomic(filePath: string, content: string): Promise<void> {
+  const dir = path.dirname(filePath);
+  const base = path.basename(filePath);
+  const tmp = path.join(dir, `.${base}.${process.pid}.${Date.now()}.tmp`);
+
+  await fs.writeFile(tmp, content, "utf8");
+  // Atomic replace on POSIX; on Windows rename may fail if dest exists.
+  try {
+    await fs.rename(tmp, filePath);
+  } catch (err: any) {
+    // Fallback for platforms where rename-overwrite is not allowed.
+    if (err?.code === "EEXIST" || err?.code === "EPERM") {
+      await fs.writeFile(filePath, content, "utf8");
+      await fs.unlink(tmp).catch(() => undefined);
+      return;
+    }
+    await fs.unlink(tmp).catch(() => undefined);
+    throw err;
+  }
+}
+
+async function withAdvisoryLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
+  // Cross-platform advisory lock via lockfile creation.
+  // Limitations: if the process crashes, the lock file may be left behind.
+  const lockPath = `${filePath}.lock`;
+  const maxWaitMs = 5_000;
+  const start = Date.now();
+
+  while (true) {
+    try {
+      const handle = await fs.open(lockPath, "wx");
+      try {
+        return await fn();
+      } finally {
+        await handle.close().catch(() => undefined);
+        await fs.unlink(lockPath).catch(() => undefined);
+      }
+    } catch (err: any) {
+      if (err?.code !== "EEXIST") throw err;
+      if (Date.now() - start > maxWaitMs) {
+        throw new Error(`Timed out waiting for lock: ${lockPath}`);
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
 }
 
 export async function writeOrgFile(filePath: string, content: string): Promise<void> {
-  await fs.writeFile(filePath, content, "utf8");
+  // Use atomic replace + an advisory lock to reduce concurrent clobbering.
+  await withAdvisoryLock(filePath, async () => {
+    await writeFileAtomic(filePath, content);
+  });
 }
 
 function isHeadingLine(line: string): boolean {
@@ -57,7 +113,7 @@ function parseHeading(line: string, allowedStates: readonly string[]) {
   const rest = line.replace(/^\*+\s+/, "");
   const parts = rest.split(/\s+/);
   const maybeState = parts[0];
-  if (allowedStates.includes(maybeState as any)) {
+  if (maybeState && allowedStates.includes(maybeState)) {
     const title = rest.slice(maybeState.length).trim();
     return { level, state: maybeState, title };
   }
@@ -195,7 +251,7 @@ export function getTaskAgentContext(text: string, taskId: string, allowedStates 
 }
 
 export function setTaskState(text: string, taskId: string, newState: string, allowedStates = DEFAULT_STATES): string {
-  if (!allowedStates.includes(newState as any)) {
+  if (!allowedStates.includes(newState)) {
     throw new Error(`Invalid state: ${newState}. Allowed: ${allowedStates.join(", ")}`);
   }
 
@@ -223,20 +279,13 @@ export function appendTaskLog(
 
   let logRange = findSubheadingRange(lines, task, "Log");
   if (!logRange) {
-    // Insert a new "** Log" section near the end of the task.
+    // Insert a new "** Log" section at the end of the task.
+    // Avoid reparsing the whole file by constructing the range directly.
     const insertAt = task.endLine + 1;
     const logHeading = `${"*".repeat(task.level + 1)} Log`;
     lines.splice(insertAt, 0, logHeading, "");
 
-    // Recompute task boundaries after insertion
-    const newText = joinLines(lines);
-    const newTask = findTaskById(newText, taskId, allowedStates);
-    const newLines = sliceLines(newText);
-    logRange = findSubheadingRange(newLines, newTask, "Log");
-    if (!logRange) throw new Error("Failed to create Log section");
-
-    // Switch to recomputed structures
-    return appendTaskLog(newText, taskId, entry, { timestamp: ts, allowedStates });
+    logRange = { start: insertAt, end: insertAt + 1, level: task.level + 1 };
   }
 
   // Append as a list item under Log
