@@ -38,6 +38,11 @@ describe("org parser", () => {
     expect(parseTasksFromOrg("\n\n")).toEqual([]);
   });
 
+  test("parseTasksFromOrg ignores malformed properties drawers (missing :END:)", () => {
+    const malformed = `* TODO Bad\n:PROPERTIES:\n:ID: bad\n`;
+    expect(parseTasksFromOrg(malformed)).toEqual([]);
+  });
+
   test("getTaskAgentContext returns Agent Context only", () => {
     const ctx = getTaskAgentContext(FIXTURE, "1111-2222");
     expect(ctx.title).toBe("Example task");
@@ -58,6 +63,12 @@ describe("org parser", () => {
     expect(next).toContain("* IN-PROGRESS Another task");
   });
 
+  test("setTaskState preserves tags/metadata on heading", () => {
+    const tagged = `* TODO Title :tag1:tag2:\n:PROPERTIES:\n:ID: t1\n:END:\n`;
+    const next = setTaskState(tagged, "t1", "DONE");
+    expect(next).toContain("* DONE Title :tag1:tag2:");
+  });
+
   test("setTaskState throws on invalid state", () => {
     expect(() => setTaskState(FIXTURE, "abcd", "NOT_A_STATE")).toThrow();
   });
@@ -68,6 +79,20 @@ describe("org parser", () => {
     });
     expect(next).toContain("** Log");
     expect(next).toContain("[2026-02-01T00:00:00.000Z] did something");
+  });
+
+  test("appendTaskLog appends to an existing Log section", () => {
+    const next = appendTaskLog(FIXTURE, "abcd", "second entry", {
+      timestamp: new Date("2026-02-02T00:00:00.000Z"),
+    });
+
+    const logIdx = next.indexOf("** Log");
+    const firstIdx = next.indexOf("[2026-01-01T00:00:00.000Z] created");
+    const secondIdx = next.indexOf("[2026-02-02T00:00:00.000Z] second entry");
+
+    expect(logIdx).toBeGreaterThanOrEqual(0);
+    expect(firstIdx).toBeGreaterThan(logIdx);
+    expect(secondIdx).toBeGreaterThan(firstIdx);
   });
 
   test("appendTaskLog throws if task not found", () => {

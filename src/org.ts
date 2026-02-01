@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 export type OrgTask = {
@@ -30,8 +31,12 @@ export const DEFAULT_STATES: readonly string[] = [
 ];
 
 export function expandHome(p: string): string {
-  if (p.startsWith("~/")) return path.join(process.env.HOME ?? "", p.slice(2));
-  return p;
+  if (!p.startsWith("~/")) return p;
+  const home = os.homedir();
+  if (!home) {
+    throw new Error("Unable to resolve home directory (os.homedir() returned empty)");
+  }
+  return path.join(home, p.slice(2));
 }
 
 export async function readOrgFile(filePath: string): Promise<string> {
@@ -121,13 +126,33 @@ function parseHeading(line: string, allowedStates: readonly string[]) {
 }
 
 function sliceLines(text: string): string[] {
-  // preserve empty last line behavior ok; we re-join with \n
-  // normalize to \n
-  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  // Preserve original newline style and whether the file ended with a newline.
+  // Internally we normalize to "\n" for parsing and mutation.
+  let eol: "\n" | "\r\n" | "\r" = "\n";
+  if (text.includes("\r\n")) eol = "\r\n";
+  else if (text.includes("\r")) eol = "\r";
+
+  const endsWithNewline = /\r\n$|\n$|\r$/.test(text);
+
+  const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const lines = normalized.split("\n");
+
+  (lines as any).__eol = eol;
+  (lines as any).__endsWithNewline = endsWithNewline;
+  return lines;
 }
 
 function joinLines(lines: string[]): string {
-  return lines.join("\n");
+  const eol: string = (lines as any).__eol ?? "\n";
+  const endsWithNewline: boolean = (lines as any).__endsWithNewline ?? true;
+
+  // We keep the split/join invariant by default (split produces a trailing "" line
+  // when the input ends with a newline). But if the original file did NOT end with
+  // a newline, ensure we don't introduce one.
+  if (!endsWithNewline && lines.length > 0 && lines[lines.length - 1] === "") {
+    return lines.slice(0, -1).join(eol);
+  }
+  return lines.join(eol);
 }
 
 function parsePropertiesDrawer(lines: string[], start: number, end: number): Record<string, string> {
@@ -140,13 +165,18 @@ function parsePropertiesDrawer(lines: string[], start: number, end: number): Rec
   if (i > end) return {};
   const props: Record<string, string> = {};
   i++;
+  let hasEnd = false;
   while (i <= end) {
     const t = lines[i]?.trim();
-    if (t === ":END:") break;
+    if (t === ":END:") {
+      hasEnd = true;
+      break;
+    }
     const m = t?.match(/^:([A-Za-z0-9_@#%\-]+):\s*(.*)$/);
     if (m) props[m[1]] = m[2] ?? "";
     i++;
   }
+  if (!hasEnd) return {};
   return props;
 }
 
@@ -258,9 +288,25 @@ export function setTaskState(text: string, taskId: string, newState: string, all
   const lines = sliceLines(text);
   const task = findTaskById(text, taskId, allowedStates);
 
-  const { level, title } = parseHeading(lines[task.startLine], allowedStates);
-  const stars = "*".repeat(level);
-  lines[task.startLine] = `${stars} ${newState} ${title}`;
+  const original = lines[task.startLine] ?? "";
+
+  // Preserve the original heading "rest" (title, tags like ":foo:", etc.).
+  // Replace an existing recognized TODO keyword if present; otherwise insert one.
+  const withStateMatch = original.match(/^(\*+)\s+(\S+)\s+(.*)$/);
+  if (withStateMatch && allowedStates.includes(withStateMatch[2])) {
+    const stars = withStateMatch[1];
+    const rest = withStateMatch[3];
+    lines[task.startLine] = `${stars} ${newState} ${rest}`;
+  } else {
+    const noStateMatch = original.match(/^(\*+)\s+(.*)$/);
+    if (!noStateMatch) {
+      throw new Error(`Invalid org heading for task ${taskId}: ${original}`);
+    }
+    const stars = noStateMatch[1];
+    const rest = noStateMatch[2];
+    lines[task.startLine] = `${stars} ${newState} ${rest}`;
+  }
+
   return joinLines(lines);
 }
 
@@ -288,8 +334,18 @@ export function appendTaskLog(
     logRange = { start: insertAt, end: insertAt + 1, level: task.level + 1 };
   }
 
-  // Append as a list item under Log
-  const bullet = `- [${stamp}] ${entry}`;
+  // Append as a list item under Log.
+  // Keep the entry single-line to avoid accidentally injecting headings/drawers.
+  const safeEntry = entry
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((l) => l.replace(/^\*+\s+/, "").trimEnd())
+    .filter((l) => l.length > 0)
+    .join(" ")
+    .trim();
+
+  const bullet = `- [${stamp}] ${safeEntry}`;
   const insertionPoint = logRange.end + 1;
 
   // Ensure there's at least one blank line before insert if needed

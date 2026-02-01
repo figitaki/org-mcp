@@ -2,7 +2,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import * as z from "zod/v3";
+import * as z from "zod";
 import { DEFAULT_STATES, getTaskAgentContext, getWorkflowFilePath, parseTasksFromOrg, readOrgFile, setTaskState, appendTaskLog, writeOrgFile } from "./org.js";
 
 /**
@@ -38,7 +38,12 @@ server.registerTool(
     const text = await readOrgFile(filePath);
     let tasks = parseTasksFromOrg(text, STATES);
 
-    if (state) tasks = tasks.filter((t) => t.state === state);
+    if (state) {
+      if (!STATES.includes(state)) {
+        throw new Error(`Invalid state filter: ${state}. Allowed: ${STATES.join(", ")}`);
+      }
+      tasks = tasks.filter((t) => t.state === state);
+    }
     if (query) {
       const q = query.toLowerCase();
       tasks = tasks.filter((t) => t.title.toLowerCase().includes(q));
