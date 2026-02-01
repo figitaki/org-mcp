@@ -27,7 +27,7 @@ Built with:
 Within a task, these subheadings have special meaning:
 - `** Agent Context` — exported to agents via `get_task_context`
 - `** Private Notes` — not exported (convention)
-- `** Log` — append-only entries written by agents/OpenClaw via `append_task_log`
+- `** Log` — append-only entries written by agents via `append_task_log`
 
 ## Project Structure
 
