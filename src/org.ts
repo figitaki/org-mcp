@@ -255,6 +255,21 @@ export function appendTaskLog(
 }
 
 export function getWorkflowFilePath(): string {
-  const p = process.env.ORG_MCP_WORKFLOW_FILE || "~/workflow.org";
-  return expandHome(p);
+  if (process.env.ORG_MCP_WORKFLOW_FILE) {
+    return expandHome(process.env.ORG_MCP_WORKFLOW_FILE);
+  }
+
+  // Repo-local default if present
+  // (handy for developing org-mcp inside its own repo)
+  // NOTE: relative path is resolved against process.cwd()
+  const local = "./workflow.org";
+  try {
+    // eslint-disable-next-line no-sync
+    require("node:fs").accessSync(local);
+    return local;
+  } catch {
+    // ignore
+  }
+
+  return expandHome("~/workflow.org");
 }
